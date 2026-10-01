@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 from dataclasses import dataclass, field
@@ -40,12 +41,27 @@ def resolve_sha(repo_dir: Path, rev: str) -> str:
     return _git(repo_dir, "rev-parse", "--verify", f"{rev}^{{commit}}").strip()
 
 
+DEFAULT_DIFF_EXCLUDES = ("uv.lock", "**/uv.lock", "poetry.lock", "package-lock.json", "pnpm-lock.yaml",
+                         ".geap/geap-harness/**", ".geap/cache/**")
+
+
+def _diff_excludes() -> list[str]:
+    raw = os.environ.get("GEAP_GATE_DIFF_EXCLUDE")
+    pats = [p.strip() for p in raw.split(",") if p.strip()] if raw is not None else list(DEFAULT_DIFF_EXCLUDES)
+    return [f":(exclude,glob){p}" for p in pats]
+
+
 def compute_diff(repo_dir: Path, base: str, head: str) -> DiffInfo:
-    """Unified diff base..head (no renames, no colour, stable options)."""
+    """Unified diff base..head (no renames, no colour, stable options).
+
+    Generated/vendored paths (lockfiles, the vendored harness) are excluded so the reviewer
+    spends its budget on authored code; set GEAP_GATE_DIFF_EXCLUDE (comma-separated globs,
+    empty string = no excludes) to override.
+    """
     base_sha, head_sha = resolve_sha(repo_dir, base), resolve_sha(repo_dir, head)
     text = _git(
         repo_dir, "diff", "--no-color", "--no-ext-diff", "--no-renames", "--unified=3",
-        f"{base_sha}", f"{head_sha}",
+        f"{base_sha}", f"{head_sha}", "--", ".", *_diff_excludes(),
     )
     info = DiffInfo(base=base_sha, head=head_sha, text=text)
     cur: str | None = None

@@ -24,3 +24,10 @@ package = false
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+
+[[tool.uv.index]]
+# Public PyPI is the default so lockfiles resolve in Cloud Build / Agent Runtime / GitHub Actions
+# (overrides any machine-level corporate mirror).
+name = "pypi"
+url = "https://pypi.org/simple"
+default = true
