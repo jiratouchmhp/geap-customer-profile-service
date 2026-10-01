@@ -1,0 +1,142 @@
+name: CI — Tests & GEAP Deterministic AI Gate
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+  checks: write
+  id-token: write
+
+jobs:
+  test:
+    name: Unit Tests (pytest)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up uv (Python 3.12)
+        uses: astral-sh/setup-uv@v4
+        with:
+          python-version: "3.12"
+
+      - name: Run pytest with JUnit XML
+        run: |
+          rm -f uv.lock
+          uv run --default-index https://pypi.org/simple pytest -q --junitxml=junit.xml
+
+      - name: Upload JUnit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-xml
+          path: junit.xml
+          if-no-files-found: error
+
+  ai-review-gate:
+    name: GEAP AI Gate
+    needs: test
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout full history for base..head diff
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up uv (Python 3.12)
+        uses: astral-sh/setup-uv@v4
+        with:
+          python-version: "3.12"
+
+      - name: Download JUnit report
+        uses: actions/download-artifact@v4
+        with:
+          name: junit-xml
+          path: .
+        continue-on-error: true
+
+      - name: Cache GEAP gate verdicts (.geap/cache)
+        uses: actions/cache@v4
+        with:
+          path: .geap/cache
+          key: geap-gate-cache-${{ runner.os }}-${{ hashFiles('.geap/policy.yaml') }}-${{ github.sha }}
+          restore-keys: |
+            geap-gate-cache-${{ runner.os }}-${{ hashFiles('.geap/policy.yaml') }}-
+            geap-gate-cache-${{ runner.os }}-
+
+      - name: Authenticate to Google Cloud via Workload Identity Federation
+        if: ${{ vars.WIF_PROVIDER != '' && vars.GEAP_CI_SA != '' }}
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          service_account: ${{ vars.GEAP_CI_SA }}
+
+      - name: Run geap-harness gate
+        id: gate
+        env:
+          WIF_PROVIDER: ${{ vars.WIF_PROVIDER }}
+          GEAP_GATE_BACKEND: ${{ vars.GEAP_GATE_BACKEND }}
+          GEAP_HARNESS_REVIEW_MODEL: ${{ vars.GEAP_HARNESS_REVIEW_MODEL || 'gemini-2.5-pro' }}
+          GEAP_GATE_CACHE_URI: ${{ vars.GEAP_GATE_CACHE_URI }}
+          GOOGLE_CLOUD_PROJECT: ${{ vars.GCP_PROJECT || 'jm-01-project' }}
+          GOOGLE_CLOUD_LOCATION: ${{ vars.GCP_REGION || 'asia-southeast1' }}
+          GOOGLE_GENAI_USE_VERTEXAI: "TRUE"
+          BASE_SHA: ${{ github.event.pull_request.base.sha || 'HEAD~1' }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          rm -f uv.lock .geap/geap-harness/uv.lock
+          if [ -n "${WIF_PROVIDER:-}" ]; then
+            BACKEND="${GEAP_GATE_BACKEND:-sdk}"
+          else
+            BACKEND="offline"
+          fi
+          if [ -d ".geap/geap-harness" ]; then
+            HARNESS=(uv run --default-index https://pypi.org/simple --project .geap/geap-harness geap-harness)
+          elif [ -d "../geap-harness" ]; then
+            HARNESS=(uv run --default-index https://pypi.org/simple --project ../geap-harness geap-harness)
+          else
+            HARNESS=(uvx --from "${GEAP_HARNESS_SOURCE:-geap-harness}" geap-harness)
+          fi
+          "${HARNESS[@]}" gate \
+            --repo-dir . \
+            --base "$BASE_SHA" \
+            --head "$HEAD_SHA" \
+            --policy .geap/policy.yaml \
+            --junit junit.xml \
+            --cache-dir .geap/cache \
+            --backend "$BACKEND" \
+            --out gate.json
+
+      - name: Upload gate.json verdict artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: geap-gate-verdict
+          path: gate.json
+          if-no-files-found: warn
+
+      - name: Publish GEAP AI Gate check run & PR comment
+        if: always()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          if [ ! -f gate.json ]; then
+            echo "gate.json not found; skipping publish"
+            exit 0
+          fi
+          rm -f .geap/geap-harness/uv.lock
+          if [ -d ".geap/geap-harness" ]; then
+            HARNESS=(uv run --default-index https://pypi.org/simple --project .geap/geap-harness geap-harness)
+          elif [ -d "../geap-harness" ]; then
+            HARNESS=(uv run --default-index https://pypi.org/simple --project ../geap-harness geap-harness)
+          else
+            HARNESS=(uvx --from "${GEAP_HARNESS_SOURCE:-geap-harness}" geap-harness)
+          fi
+          "${HARNESS[@]}" publish --gate gate.json --sha "$HEAD_SHA"

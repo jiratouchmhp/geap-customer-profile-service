@@ -1,0 +1,152 @@
+name: CD — Staging & Production (Cloud Run)
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+  deployments: write
+
+env:
+  GCP_PROJECT: ${{ vars.GCP_PROJECT || 'jm-01-project' }}
+  GCP_REGION: ${{ vars.GCP_REGION || 'asia-southeast1' }}
+  AR_REPO: ${{ vars.AR_REPO || 'geap-sdlc' }}
+
+jobs:
+  deploy-staging:
+    name: Build & Deploy cps-staging
+    runs-on: ubuntu-latest
+    environment:
+      name: staging
+      url: ${{ steps.smoke.outputs.url }}
+    outputs:
+      image: ${{ steps.meta.outputs.image }}
+      staging_url: ${{ steps.smoke.outputs.url }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Compute Artifact Registry image URI
+        id: meta
+        run: |
+          SHORT_SHA="${GITHUB_SHA::12}"
+          IMAGE="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT}/${AR_REPO}/customer-profile-service:${SHORT_SHA}"
+          echo "image=${IMAGE}" >> "$GITHUB_OUTPUT"
+
+      - name: Authenticate to Google Cloud via Workload Identity Federation
+        if: ${{ vars.WIF_PROVIDER != '' && vars.GEAP_CI_SA != '' }}
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          service_account: ${{ vars.GEAP_CI_SA }}
+
+      - name: Set up Google Cloud SDK
+        if: ${{ vars.WIF_PROVIDER != '' && vars.GEAP_CI_SA != '' }}
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Cloud Build container image
+        env:
+          WIF_PROVIDER: ${{ vars.WIF_PROVIDER }}
+          IMAGE: ${{ steps.meta.outputs.image }}
+        run: |
+          if [ -z "${WIF_PROVIDER:-}" ]; then
+            echo "WIF_PROVIDER not configured; simulated Cloud Build for ${IMAGE}"
+            exit 0
+          fi
+          gcloud builds submit . \
+            --project "${GCP_PROJECT}" \
+            --tag "${IMAGE}" \
+            --quiet
+
+      - name: Deploy cps-staging to Cloud Run
+        id: deploy
+        env:
+          WIF_PROVIDER: ${{ vars.WIF_PROVIDER }}
+          IMAGE: ${{ steps.meta.outputs.image }}
+        run: |
+          if [ -z "${WIF_PROVIDER:-}" ]; then
+            echo "url=https://cps-staging-simulated.a.run.app" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          gcloud run deploy cps-staging \
+            --project "${GCP_PROJECT}" \
+            --region "${GCP_REGION}" \
+            --image "${IMAGE}" \
+            --set-env-vars "CPS_ENV=staging" \
+            --quiet
+          URL="$(gcloud run services describe cps-staging --project "${GCP_PROJECT}" --region "${GCP_REGION}" --format='value(status.url)')"
+          echo "url=${URL}" >> "$GITHUB_OUTPUT"
+
+      - name: Smoke test /healthz on cps-staging
+        id: smoke
+        env:
+          WIF_PROVIDER: ${{ vars.WIF_PROVIDER }}
+          STAGING_URL: ${{ steps.deploy.outputs.url }}
+        run: |
+          echo "url=${STAGING_URL}" >> "$GITHUB_OUTPUT"
+          if [ -z "${WIF_PROVIDER:-}" ]; then
+            echo "Simulated /healthz smoke check OK on ${STAGING_URL}/healthz"
+            exit 0
+          fi
+          TOKEN="$(gcloud auth print-identity-token)"
+          RESP="$(curl -fsS --retry 3 --retry-delay 2 -H "Authorization: Bearer ${TOKEN}" "${STAGING_URL}/healthz")"
+          echo "cps-staging /healthz: ${RESP}"
+          echo "${RESP}" | grep -q '"status"[[:space:]]*:[[:space:]]*"ok"'
+
+  deploy-prod:
+    name: Deploy cps-prod (Approval-Gated)
+    needs: deploy-staging
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: ${{ steps.prod.outputs.url }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud via Workload Identity Federation
+        if: ${{ vars.WIF_PROVIDER != '' && vars.GEAP_CI_SA != '' }}
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          service_account: ${{ vars.GEAP_CI_SA }}
+
+      - name: Set up Google Cloud SDK
+        if: ${{ vars.WIF_PROVIDER != '' && vars.GEAP_CI_SA != '' }}
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Deploy cps-prod to Cloud Run
+        id: prod
+        env:
+          WIF_PROVIDER: ${{ vars.WIF_PROVIDER }}
+          IMAGE: ${{ needs.deploy-staging.outputs.image }}
+        run: |
+          if [ -z "${WIF_PROVIDER:-}" ]; then
+            echo "url=https://cps-prod-simulated.a.run.app" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          gcloud run deploy cps-prod \
+            --project "${GCP_PROJECT}" \
+            --region "${GCP_REGION}" \
+            --image "${IMAGE}" \
+            --set-env-vars "CPS_ENV=prod" \
+            --quiet
+          URL="$(gcloud run services describe cps-prod --project "${GCP_PROJECT}" --region "${GCP_REGION}" --format='value(status.url)')"
+          echo "url=${URL}" >> "$GITHUB_OUTPUT"
+
+      - name: Smoke test /healthz on cps-prod
+        env:
+          WIF_PROVIDER: ${{ vars.WIF_PROVIDER }}
+          PROD_URL: ${{ steps.prod.outputs.url }}
+        run: |
+          if [ -z "${WIF_PROVIDER:-}" ]; then
+            echo "Simulated /healthz smoke check OK on ${PROD_URL}/healthz"
+            exit 0
+          fi
+          TOKEN="$(gcloud auth print-identity-token)"
+          RESP="$(curl -fsS --retry 3 --retry-delay 2 -H "Authorization: Bearer ${TOKEN}" "${PROD_URL}/healthz")"
+          echo "cps-prod /healthz: ${RESP}"
+          echo "${RESP}" | grep -q '"status"[[:space:]]*:[[:space:]]*"ok"'

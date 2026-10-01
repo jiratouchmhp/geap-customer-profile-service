@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.git/
+.github/
+.geap/cache/
+tests/
+junit.xml
+gate.json
+*.md

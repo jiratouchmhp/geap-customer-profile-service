@@ -1,0 +1,49 @@
+openapi: 3.0.3
+info:
+  title: Customer Profile Service
+  version: 2.2.0
+  description: Customer profile API (SVC-CPS). NOTE - last regenerated for 2.2.0.
+servers:
+  - url: https://api.example.internal/cps
+paths:
+  /customers/{customer_id}:
+    get:
+      operationId: getCustomer
+      summary: Get a customer profile
+      parameters:
+        - name: customer_id
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        "200":
+          description: Customer profile
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Customer"}
+        "404": {description: Not found}
+  /customer/update:
+    post:
+      operationId: updateCustomer
+      summary: Update customer contact details
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                customer_id: {type: string}
+                email: {type: string}
+                phone: {type: string}
+      responses:
+        "200": {description: Updated}
+components:
+  schemas:
+    Customer:
+      type: object
+      properties:
+        customer_id: {type: string}
+        full_name: {type: string}
+        email: {type: string}
+        phone: {type: string}

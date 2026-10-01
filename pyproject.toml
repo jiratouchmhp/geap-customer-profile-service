@@ -1,0 +1,26 @@
+[project]
+name = "customer-profile-service"
+version = "2.3.1"
+description = "Customer self-service profile API (SVC-CPS) — GEAP AI-SDLC showcase application"
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
+dependencies = [
+    "fastapi==0.115.0",
+    "uvicorn==0.30.6",
+    "pydantic==2.8.2",
+    "httpx==0.27.2",
+    "pytest==8.3.2",
+]
+
+[dependency-groups]
+dev = [
+    "pytest==8.3.2",
+    "httpx==0.27.2",
+]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
