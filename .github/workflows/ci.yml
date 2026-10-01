@@ -136,9 +136,10 @@ jobs:
           set -euo pipefail
           rm -f uv.lock .geap/geap-harness/uv.lock
           EXTRA=""
-          if [ "$GEAP_GATE_BACKEND" = "sdk" ]; then EXTRA="[sdk]"; fi
+          UV_EXTRA=()
+          if [ "$GEAP_GATE_BACKEND" = "sdk" ]; then EXTRA="[sdk]"; UV_EXTRA=(--extra sdk); fi
           if [ -d ".geap/geap-harness" ]; then
-            HARNESS=(uv run --default-index https://pypi.org/simple --project .geap/geap-harness geap-harness)
+            HARNESS=(uv run --default-index https://pypi.org/simple --project .geap/geap-harness "${UV_EXTRA[@]}" geap-harness)
           else
             HARNESS=(uvx --from "${GEAP_HARNESS_SOURCE}${EXTRA}" geap-harness)
           fi
