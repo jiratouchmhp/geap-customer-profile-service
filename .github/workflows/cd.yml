@@ -1,152 +1,136 @@
-name: CD — Staging & Production (Cloud Run)
+name: CD — Deploy to Cloud Run
+
+# Dispatched by the GEAP pipeline (scm.dispatch_deploy) with inputs environment / ref / geap_run_id.
+# The job's `environment:` makes GitHub record a Deployment the pipeline reads back
+# (deployment_status). There is NO simulated deploy: missing GCP configuration fails the run.
 
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment"
+        required: true
+        default: staging
+        type: choice
+        options: [staging, production]
+      ref:
+        description: "Git ref / SHA to deploy"
+        required: true
+        default: main
+      geap_run_id:
+        description: "GEAP pipeline run id (for traceability)"
+        required: false
+        default: ""
+
+run-name: "CD ${{ inputs.environment }} @ ${{ inputs.ref }} (geap ${{ inputs.geap_run_id || 'manual' }})"
 
 permissions:
   contents: read
   id-token: write
   deployments: write
 
+concurrency:
+  group: cd-${{ inputs.environment }}
+  cancel-in-progress: false
+
 env:
-  GCP_PROJECT: ${{ vars.GCP_PROJECT || 'jm-01-project' }}
-  GCP_REGION: ${{ vars.GCP_REGION || 'asia-southeast1' }}
+  GCP_PROJECT: ${{ vars.GCP_PROJECT }}
+  GCP_REGION: ${{ vars.GCP_REGION }}
   AR_REPO: ${{ vars.AR_REPO || 'geap-sdlc' }}
+  SERVICE_NAME: ${{ vars.SERVICE_NAME || github.event.repository.name }}
 
 jobs:
-  deploy-staging:
-    name: Build & Deploy cps-staging
+  deploy:
+    name: Deploy ${{ inputs.environment }}
     runs-on: ubuntu-latest
     environment:
-      name: staging
+      name: ${{ inputs.environment }}
       url: ${{ steps.smoke.outputs.url }}
     outputs:
-      image: ${{ steps.meta.outputs.image }}
-      staging_url: ${{ steps.smoke.outputs.url }}
+      url: ${{ steps.smoke.outputs.url }}
+      revision: ${{ steps.deploy.outputs.revision }}
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Compute Artifact Registry image URI
-        id: meta
+      - name: Validate configuration
+        env:
+          WIF_PROVIDER: ${{ vars.WIF_PROVIDER }}
+          GEAP_CI_SA: ${{ vars.GEAP_CI_SA }}
         run: |
-          SHORT_SHA="${GITHUB_SHA::12}"
-          IMAGE="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT}/${AR_REPO}/customer-profile-service:${SHORT_SHA}"
-          echo "image=${IMAGE}" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          missing=""
+          for v in WIF_PROVIDER GEAP_CI_SA GCP_PROJECT GCP_REGION; do
+            if [ -z "${!v:-}" ]; then missing="$missing $v"; fi
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::CD needs repository variables:$missing"
+            exit 1
+          fi
+
+      - name: Checkout ref
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
 
       - name: Authenticate to Google Cloud via Workload Identity Federation
-        if: ${{ vars.WIF_PROVIDER != '' && vars.GEAP_CI_SA != '' }}
         uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ vars.WIF_PROVIDER }}
           service_account: ${{ vars.GEAP_CI_SA }}
 
       - name: Set up Google Cloud SDK
-        if: ${{ vars.WIF_PROVIDER != '' && vars.GEAP_CI_SA != '' }}
         uses: google-github-actions/setup-gcloud@v2
 
-      - name: Cloud Build container image
-        env:
-          WIF_PROVIDER: ${{ vars.WIF_PROVIDER }}
-          IMAGE: ${{ steps.meta.outputs.image }}
+      - name: Build image with Cloud Build
+        id: build
         run: |
-          if [ -z "${WIF_PROVIDER:-}" ]; then
-            echo "WIF_PROVIDER not configured; simulated Cloud Build for ${IMAGE}"
-            exit 0
-          fi
-          gcloud builds submit . \
-            --project "${GCP_PROJECT}" \
-            --tag "${IMAGE}" \
-            --quiet
+          set -euo pipefail
+          SHA="$(git rev-parse HEAD)"
+          IMAGE="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT}/${AR_REPO}/${SERVICE_NAME}:${SHA::12}"
+          gcloud builds submit . --project "${GCP_PROJECT}" --tag "${IMAGE}" --quiet
+          echo "image=${IMAGE}" >> "$GITHUB_OUTPUT"
+          echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
 
-      - name: Deploy cps-staging to Cloud Run
+      - name: Deploy to Cloud Run
         id: deploy
         env:
-          WIF_PROVIDER: ${{ vars.WIF_PROVIDER }}
-          IMAGE: ${{ steps.meta.outputs.image }}
+          TARGET_ENV: ${{ inputs.environment }}
+          IMAGE: ${{ steps.build.outputs.image }}
+          GEAP_RUN_ID: ${{ inputs.geap_run_id }}
         run: |
-          if [ -z "${WIF_PROVIDER:-}" ]; then
-            echo "url=https://cps-staging-simulated.a.run.app" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          gcloud run deploy cps-staging \
+          set -euo pipefail
+          SUFFIX="$([ "$TARGET_ENV" = "production" ] && echo prod || echo staging)"
+          SVC="${SERVICE_NAME}-${SUFFIX}"
+          gcloud run deploy "${SVC}" \
             --project "${GCP_PROJECT}" \
             --region "${GCP_REGION}" \
             --image "${IMAGE}" \
-            --set-env-vars "CPS_ENV=staging" \
+            --set-env-vars "APP_ENV=${SUFFIX},CPS_ENV=${SUFFIX}" \
+            --labels "geap-run=$(echo "${GEAP_RUN_ID:-manual}" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9-' '-' | cut -c1-63)" \
             --quiet
-          URL="$(gcloud run services describe cps-staging --project "${GCP_PROJECT}" --region "${GCP_REGION}" --format='value(status.url)')"
+          URL="$(gcloud run services describe "${SVC}" --project "${GCP_PROJECT}" --region "${GCP_REGION}" --format='value(status.url)')"
+          REV="$(gcloud run services describe "${SVC}" --project "${GCP_PROJECT}" --region "${GCP_REGION}" --format='value(status.latestReadyRevisionName)')"
           echo "url=${URL}" >> "$GITHUB_OUTPUT"
+          echo "revision=${REV}" >> "$GITHUB_OUTPUT"
 
-      - name: Smoke test /healthz on cps-staging
+      - name: Smoke test /healthz
         id: smoke
         env:
-          WIF_PROVIDER: ${{ vars.WIF_PROVIDER }}
-          STAGING_URL: ${{ steps.deploy.outputs.url }}
+          URL: ${{ steps.deploy.outputs.url }}
         run: |
-          echo "url=${STAGING_URL}" >> "$GITHUB_OUTPUT"
-          if [ -z "${WIF_PROVIDER:-}" ]; then
-            echo "Simulated /healthz smoke check OK on ${STAGING_URL}/healthz"
-            exit 0
-          fi
-          TOKEN="$(gcloud auth print-identity-token)"
-          RESP="$(curl -fsS --retry 3 --retry-delay 2 -H "Authorization: Bearer ${TOKEN}" "${STAGING_URL}/healthz")"
-          echo "cps-staging /healthz: ${RESP}"
-          echo "${RESP}" | grep -q '"status"[[:space:]]*:[[:space:]]*"ok"'
-
-  deploy-prod:
-    name: Deploy cps-prod (Approval-Gated)
-    needs: deploy-staging
-    runs-on: ubuntu-latest
-    environment:
-      name: production
-      url: ${{ steps.prod.outputs.url }}
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Authenticate to Google Cloud via Workload Identity Federation
-        if: ${{ vars.WIF_PROVIDER != '' && vars.GEAP_CI_SA != '' }}
-        uses: google-github-actions/auth@v2
-        with:
-          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
-          service_account: ${{ vars.GEAP_CI_SA }}
-
-      - name: Set up Google Cloud SDK
-        if: ${{ vars.WIF_PROVIDER != '' && vars.GEAP_CI_SA != '' }}
-        uses: google-github-actions/setup-gcloud@v2
-
-      - name: Deploy cps-prod to Cloud Run
-        id: prod
-        env:
-          WIF_PROVIDER: ${{ vars.WIF_PROVIDER }}
-          IMAGE: ${{ needs.deploy-staging.outputs.image }}
-        run: |
-          if [ -z "${WIF_PROVIDER:-}" ]; then
-            echo "url=https://cps-prod-simulated.a.run.app" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          gcloud run deploy cps-prod \
-            --project "${GCP_PROJECT}" \
-            --region "${GCP_REGION}" \
-            --image "${IMAGE}" \
-            --set-env-vars "CPS_ENV=prod" \
-            --quiet
-          URL="$(gcloud run services describe cps-prod --project "${GCP_PROJECT}" --region "${GCP_REGION}" --format='value(status.url)')"
+          set -euo pipefail
           echo "url=${URL}" >> "$GITHUB_OUTPUT"
-
-      - name: Smoke test /healthz on cps-prod
-        env:
-          WIF_PROVIDER: ${{ vars.WIF_PROVIDER }}
-          PROD_URL: ${{ steps.prod.outputs.url }}
-        run: |
-          if [ -z "${WIF_PROVIDER:-}" ]; then
-            echo "Simulated /healthz smoke check OK on ${PROD_URL}/healthz"
-            exit 0
-          fi
           TOKEN="$(gcloud auth print-identity-token)"
-          RESP="$(curl -fsS --retry 3 --retry-delay 2 -H "Authorization: Bearer ${TOKEN}" "${PROD_URL}/healthz")"
-          echo "cps-prod /healthz: ${RESP}"
+          RESP="$(curl -fsS --retry 5 --retry-delay 3 -H "Authorization: Bearer ${TOKEN}" "${URL}/healthz")"
+          echo "/healthz: ${RESP}"
           echo "${RESP}" | grep -q '"status"[[:space:]]*:[[:space:]]*"ok"'
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### GEAP CD"
+            echo "- environment: ${{ inputs.environment }}"
+            echo "- ref: ${{ inputs.ref }}"
+            echo "- geap_run_id: ${{ inputs.geap_run_id }}"
+            echo "- url: ${{ steps.deploy.outputs.url }}"
+            echo "- revision: ${{ steps.deploy.outputs.revision }}"
+          } >> "$GITHUB_STEP_SUMMARY"
