@@ -1,0 +1,23 @@
+# GEAP AI Gate policy for the Customer Profile Service (evaluated by `geap-harness gate`).
+# Pure data: the reviewer (Antigravity SDK / agy / offline heuristics) proposes findings,
+# this policy decides pass/fail deterministically. Changing this file changes policy_hash,
+# which invalidates cached verdicts (ADR-009).
+version: 1
+service: SVC-CPS
+rules:
+  # Filters (drop findings that cannot be trusted)
+  critic:
+    require_control_id: true
+    require_evidence: true
+  evidence_must_resolve: changed_files   # file:line must exist at head in a file changed by the PR
+
+  # Gating rules
+  fail_on_severity: [Critical]
+  max_findings_required: 3
+  required_controls_evidenced:
+    - control_id: SEC-AUTHZ-01          # object-level authorization is present on customer routes
+      pattern: 'authorize_customer_access\('
+      paths: ['app/routers/*.py']
+  tests_passed:
+    required: true
+    junit_required: false               # CI passes --junit; the offline mock runner may not

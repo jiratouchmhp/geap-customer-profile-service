@@ -1,0 +1,8 @@
+# CODEOWNERS — Customer Profile Service (SVC-CPS)
+# Merge and production deployment remain human-accountable decisions (BRD §11.1, FR-CON-BI-11).
+*                       @customer-experience-team @platform-eng
+/app/security.py        @security-eng @customer-experience-team
+/app/routers/           @customer-experience-team
+/openapi.yaml           @customer-experience-team
+/.geap/                 @ai-governance @security-eng
+/.github/workflows/     @platform-eng @security-eng
