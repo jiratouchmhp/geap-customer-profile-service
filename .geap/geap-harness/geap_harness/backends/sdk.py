@@ -18,7 +18,9 @@ cache / ``--replay`` check in ``gate.py`` (ADR-009).
 from __future__ import annotations
 
 import asyncio
+import json
 import os
+import re
 from pathlib import Path
 
 from ..gitdiff import DiffInfo
@@ -98,6 +100,27 @@ def build_config(repo_dir: Path, skills: list[Skill], model: str | None):
     )
 
 
+_FENCE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL)
+
+
+def _json_from_text(text: str) -> dict | None:
+    """Recover a JSON object the model emitted as text (```json fences or a bare object)."""
+    if not text:
+        return None
+    candidates = [m.group(1).strip() for m in _FENCE.finditer(text)]
+    start, end = text.find("{"), text.rfind("}")
+    if start != -1 and end > start:
+        candidates.append(text[start:end + 1])
+    for c in candidates:
+        try:
+            obj = json.loads(c)
+        except ValueError:
+            continue
+        if isinstance(obj, dict):
+            return obj
+    return None
+
+
 async def _run(cfg, prompt: str) -> tuple[dict | None, dict, str | None, str]:
     from google.antigravity import Agent
 
@@ -124,8 +147,15 @@ def review(repo_dir: Path, diff: DiffInfo, *, prompt: str, skills: list[Skill], 
     except TimeoutError as exc:
         raise BackendError(f"sdk reviewer timed out after {timeout_s}s") from exc
     if data is None:
+        data = _json_from_text(text)
+        if data is not None:
+            stop = f"{stop}+text_json"
+    if data is None:
         raise BackendError(f"sdk reviewer returned no structured output (stop_reason={stop}): {text[:300]}")
-    fl = FindingList.model_validate(data)
+    try:
+        fl = FindingList.model_validate(data)
+    except ValueError as exc:  # pydantic.ValidationError subclasses ValueError
+        raise BackendError(f"sdk reviewer output failed schema validation: {exc}") from exc
     usage = {**usage, "stop_reason": stop, "model": model}
     return ReviewResult(backend="sdk", model=model, summary=fl.summary,
                         findings=sort_findings(fl.findings), usage=usage)
