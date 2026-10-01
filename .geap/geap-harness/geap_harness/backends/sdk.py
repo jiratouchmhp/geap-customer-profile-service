@@ -58,7 +58,9 @@ def build_config(repo_dir: Path, skills: list[Skill], model: str | None):
                            "or GEMINI_API_KEY")
 
     level = getattr(ThinkingLevel, os.environ.get("GEAP_HARNESS_THINKING_LEVEL", "LOW").upper(), ThinkingLevel.LOW)
-    options = GeminiModelOptions(thinking_level=level)
+    # thinking_level is Gemini 3+ only; Vertex returns 400 "thinking_level is not supported" for 2.x.
+    supports_level = bool(model) and model.startswith("gemini-3")
+    options = GeminiModelOptions(thinking_level=level) if supports_level else GeminiModelOptions()
     model_kwargs: dict = {}
     if model and not model.endswith("-default"):
         endpoint = (VertexEndpoint(project=project, location=location, options=options) if use_vertex

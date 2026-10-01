@@ -55,7 +55,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       GEAP_GATE_BACKEND: ${{ vars.GEAP_GATE_BACKEND || 'cli' }}
-      GEAP_HARNESS_REVIEW_MODEL: ${{ vars.GEAP_HARNESS_REVIEW_MODEL || 'gemini-2.5-pro' }}
+      GEAP_HARNESS_REVIEW_MODEL: ${{ vars.GEAP_HARNESS_REVIEW_MODEL || 'gemini-3-flash-preview' }}
       GEAP_GATE_CACHE_URI: ${{ vars.GEAP_GATE_CACHE_URI }}
       GOOGLE_CLOUD_PROJECT: ${{ vars.GCP_PROJECT }}
       GOOGLE_CLOUD_LOCATION: ${{ vars.GCP_REGION }}
